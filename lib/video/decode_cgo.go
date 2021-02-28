@@ -1,6 +1,6 @@
 // +build cgo
 
-package image
+package video
 
 /*
 #include <stdint.h>

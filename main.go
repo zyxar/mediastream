@@ -16,11 +16,10 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/zyxar/mediastream/lib/codec/openh264"
-
 	"github.com/zyxar/mediastream/lib/avfoundation"
+	"github.com/zyxar/mediastream/lib/codec/openh264"
 	"github.com/zyxar/mediastream/lib/format"
-	"github.com/zyxar/mediastream/lib/image"
+	"github.com/zyxar/mediastream/lib/video"
 )
 
 var (
@@ -40,17 +39,13 @@ func main() {
 	defer s.Close()
 	p := s.Property()
 
-	type encoder func(w io.Writer, i image.Image) error
-	var buf = make([]byte, s.BufferSize())
+	type encoder func(w io.Writer, buf []byte) error
+	var imageBuffer = make([]byte, s.BufferSize())
 	var encode = func(w io.Writer, enc encoder) error {
-		if _, err := s.ReadVideoFrame(buf); err != nil {
+		if _, err := s.ReadVideoFrame(imageBuffer); err != nil {
 			return err
 		}
-		i, err := image.Decode(p.PixelFormat, buf, p.Width, p.Height)
-		if err != nil {
-			return err
-		}
-		return enc(w, i)
+		return enc(w, imageBuffer)
 	}
 
 	if *selectedOut != "" {
@@ -64,22 +59,25 @@ func main() {
 		}
 		defer file.Close()
 
-		s := make(chan os.Signal, 1)
-		signal.Notify(s, syscall.SIGINT, syscall.SIGABRT, syscall.SIGTERM, syscall.SIGHUP)
-		defer signal.Stop(s)
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGABRT, syscall.SIGTERM, syscall.SIGHUP)
+		defer signal.Stop(sig)
 
-		buf := make([]byte, p.Width*p.Height)
-		enc := func(w io.Writer, i image.Image) error {
-			img, _ := image.Convert(i)
-			l, err := codec.EncodeFrame(buf, img)
+		var frameBuffer = make([]byte, s.BufferSize())
+		enc := func(w io.Writer, buf []byte) error {
+			img, err := video.DecodeToYUV420(p.PixelFormat, buf, p.Width, p.Height)
+			if err != nil {
+				return err
+			}
+			l, err := codec.EncodeFrame(frameBuffer, img)
 			if l > 0 {
-				_, err = w.Write(buf[:l])
+				_, err = w.Write(frameBuffer[:l])
 			}
 			return err
 		}
 		for {
 			select {
-			case <-s:
+			case <-sig:
 				return
 			default:
 				if err = encode(file, enc); err != nil {
@@ -102,8 +100,12 @@ func main() {
 				log.Println(err)
 				return
 			}
-			err = encode(partWriter, func(w io.Writer, i image.Image) error {
-				return jpeg.Encode(w, i, nil)
+			err = encode(partWriter, func(w io.Writer, buf []byte) error {
+				img, err := video.Decode(p.PixelFormat, buf, p.Width, p.Height)
+				if err != nil {
+					return err
+				}
+				return jpeg.Encode(w, img, nil)
 			})
 			if err != nil {
 				log.Println(err)

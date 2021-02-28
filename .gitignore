@@ -14,6 +14,7 @@ mediastream
 *.test
 *.log
 logs/⏎
+*.h264
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out

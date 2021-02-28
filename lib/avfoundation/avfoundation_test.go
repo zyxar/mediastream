@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/zyxar/mediastream/lib/format"
-	"github.com/zyxar/mediastream/lib/image"
+	"github.com/zyxar/mediastream/lib/video"
 )
 
 func TestSession(t *testing.T) {
@@ -22,7 +22,7 @@ func TestSession(t *testing.T) {
 		} else if i != s.BufferSize() {
 			t.Error("size mismatch")
 		}
-		_, err := image.Decode(p.PixelFormat, buf, p.Width, p.Height)
+		_, err := video.Decode(p.PixelFormat, buf, p.Width, p.Height)
 		if err != nil {
 			t.Error(err)
 		}

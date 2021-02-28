@@ -1,6 +1,6 @@
 // +build !cgo
 
-package image
+package video
 
 func fillYUY2(y, cb, cr []byte, buf []byte, width, height int) {
 	fi := width * height * 2

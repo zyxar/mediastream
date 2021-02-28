@@ -3,13 +3,26 @@ package video
 import (
 	"errors"
 	"image"
+	"image/color"
 )
 
 var ErrUnsupportedPixelFormat = errors.New("unsupported pixel format")
 
 func Convert(src image.Image) (*image.YCbCr, error) {
 	switch img := src.(type) {
-	case *image.RGBA: // not yet
+	case *image.RGBA:
+		bounds := img.Bounds()
+		dst := image.NewYCbCr(bounds, image.YCbCrSubsampleRatio420)
+		for row := 0; row < bounds.Max.Y; row++ {
+			for col := 0; col < bounds.Max.X; col++ {
+				r, g, b, _ := img.At(col, row).RGBA()
+				dst.Y[dst.YOffset(col, row)],
+					dst.Cb[dst.COffset(col, row)],
+					dst.Cr[dst.COffset(col, row)] = color.RGBToYCbCr(uint8(r), uint8(g), uint8(b))
+			}
+		}
+		return dst, nil
+
 	case *image.YCbCr:
 		switch img.SubsampleRatio {
 		case image.YCbCrSubsampleRatio444:

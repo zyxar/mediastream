@@ -7,6 +7,7 @@ extern "C" {
 int newEncoder(ISVCEncoder **enc, int width, int height, int bitrate, float frameRate);
 void closeEncoder(ISVCEncoder* enc);
 int encode(ISVCEncoder *enc, uint8_t *dst, size_t *size, uint8_t *srcY, uint8_t *srcCb, uint8_t *srcCr, int width, int height);
+int forceIntraFrame(ISVCEncoder *enc);
 }
 
 /* ref:
@@ -108,4 +109,9 @@ int encode(ISVCEncoder *enc, uint8_t *dst, size_t *size, uint8_t *srcY, uint8_t 
         dst += layer_size[layer];
     }
     return 0;
+}
+
+int forceIntraFrame(ISVCEncoder *enc)
+{
+    return enc->ForceIntraFrame(true);
 }

@@ -9,6 +9,7 @@ package openh264
 int newEncoder(ISVCEncoder **enc, int width, int height, int bitrate, float frameRate);
 void closeEncoder(ISVCEncoder* enc);
 int encode(ISVCEncoder *enc, uint8_t *dst, size_t *size, uint8_t *srcY, uint8_t *srcCb, uint8_t *srcCr, int width, int height);
+int forceIntraFrame(ISVCEncoder *enc);
 */
 import "C"
 import (
@@ -16,9 +17,7 @@ import (
 	"syscall"
 )
 
-type encoder struct {
-	enc *C.ISVCEncoder
-}
+type encoder struct{ enc *C.ISVCEncoder }
 
 func NewEncoder(width int, height int, bitrate int, frameRate float64) (*encoder, error) {
 	var enc *C.ISVCEncoder
@@ -53,4 +52,11 @@ func (e *encoder) EncodeFrame(dst []byte, i image.Image) (int, error) {
 		return e.encodeYUVFrame(dst, j)
 	}
 	panic("not implemented")
+}
+
+func (e *encoder) ForceIntraFrame() error {
+	if C.forceIntraFrame(e.enc) != 0 {
+		return syscall.EINVAL
+	}
+	return nil
 }

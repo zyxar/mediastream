@@ -8,18 +8,26 @@ import (
 	"image/jpeg"
 	"io"
 	"log"
+	"math"
+	"math/rand"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/zyxar/mediastream/lib/avfoundation"
 	"github.com/zyxar/mediastream/lib/codec/openh264"
 	"github.com/zyxar/mediastream/lib/format"
 	"github.com/zyxar/mediastream/lib/video"
+
+	"github.com/pion/rtp"
+	"github.com/pion/rtp/codecs"
 )
 
 var (
@@ -32,7 +40,8 @@ func main() {
 	flag.Parse()
 
 	var pixelFormat = format.PixelFormat(strings.ToUpper(*selectedFormat))
-	s, err := avfoundation.NewSession(avfoundation.Property{PixelFormat: pixelFormat, FrameRate: *selectedFrameRate})
+	s, err := avfoundation.NewSession(
+		avfoundation.Property{PixelFormat: pixelFormat, Width: 640, Height: 480, FrameRate: *selectedFrameRate})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -53,17 +62,42 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		file, err := os.Create(*selectedOut)
+
+		var writer io.Writer
+		uri, err := url.ParseRequestURI(*selectedOut)
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer file.Close()
+		switch uri.Scheme {
+		case "rtp":
+			conn, err := net.Dial("udp", uri.Host)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer conn.Close()
+			writer = conn
+		default:
+			file, err := os.Create(*selectedOut)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer file.Close()
+			writer = file
+		}
+
+		const mtu = 1000
+		const payloadType = 125
+		const clockRate = 9000
+		packetizer := rtp.NewPacketizer(mtu, uint8(payloadType), rand.Uint32(),
+			&codecs.H264Payloader{}, rtp.NewRandomSequencer(), clockRate)
 
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGABRT, syscall.SIGTERM, syscall.SIGHUP)
 		defer signal.Stop(sig)
 
 		var frameBuffer = make([]byte, s.BufferSize())
+		var pktBuffer = make([]byte, mtu)
+		sampler := &sampler{clockRate, time.Now()}
 		enc := func(w io.Writer, buf []byte) error {
 			img, err := video.DecodeToYUV420(p.PixelFormat, buf, p.Width, p.Height)
 			if err != nil {
@@ -71,7 +105,16 @@ func main() {
 			}
 			l, err := codec.EncodeFrame(frameBuffer, img)
 			if l > 0 {
-				_, err = w.Write(frameBuffer[:l])
+				for _, pkt := range packetizer.Packetize(frameBuffer[:l], sampler.Samples()) {
+					n, err := pkt.MarshalTo(pktBuffer)
+					if err != nil {
+						log.Println(err)
+						break
+					}
+					if _, err = w.Write(pktBuffer[:n]); err != nil {
+						return err
+					}
+				}
 			}
 			return err
 		}
@@ -80,7 +123,7 @@ func main() {
 			case <-sig:
 				return
 			default:
-				if err = encode(file, enc); err != nil {
+				if err = encode(writer, enc); err != nil {
 					log.Println(err)
 					return
 				}
@@ -114,4 +157,16 @@ func main() {
 		}
 	})
 	http.ListenAndServe("localhost:5000", nil)
+}
+
+type sampler struct {
+	clockRate float64
+	timestamp time.Time
+}
+
+func (s *sampler) Samples() (n uint32) {
+	now := time.Now()
+	n = uint32(math.Round(s.clockRate * now.Sub(s.timestamp).Seconds()))
+	s.timestamp = now
+	return
 }

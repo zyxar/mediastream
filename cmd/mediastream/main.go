@@ -48,13 +48,13 @@ func main() {
 	defer s.Close()
 	p := s.Property()
 
-	type encoder func(w io.Writer, buf []byte) error
 	var imageBuffer = make([]byte, s.BufferSize())
-	var encode = func(w io.Writer, enc encoder) error {
+	var process = func(w io.Writer) error {
 		if _, err := s.ReadVideoFrame(imageBuffer); err != nil {
 			return err
 		}
-		return enc(w, imageBuffer)
+		_, err = w.Write(imageBuffer)
+		return err
 	}
 
 	if *selectedOut != "" {
@@ -62,9 +62,23 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		var frameBuffer = make([]byte, s.BufferSize())
+		enc := func(w io.Writer) writerFn {
+			return func(buf []byte) (n int, err error) {
+				img, err := video.DecodeToYUV420(p.PixelFormat, buf, p.Width, p.Height)
+				if err != nil {
+					return n, err
+				}
+				l, err := codec.EncodeFrame(frameBuffer, img)
+				if l > 0 {
+					return w.Write(frameBuffer[:l])
+				}
+				return n, nil
+			}
+		}
 
 		var writer io.Writer
-		uri, err := url.ParseRequestURI(*selectedOut)
+		uri, err := url.Parse(*selectedOut)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -75,55 +89,26 @@ func main() {
 				log.Fatal(err)
 			}
 			defer conn.Close()
-			writer = conn
+			writer = enc(newH264RTPWriter(conn))
 		default:
 			file, err := os.Create(*selectedOut)
 			if err != nil {
 				log.Fatal(err)
 			}
 			defer file.Close()
-			writer = file
+			writer = enc(file)
 		}
-
-		const mtu = 1000
-		const payloadType = 125
-		const clockRate = 9000
-		packetizer := rtp.NewPacketizer(mtu, uint8(payloadType), rand.Uint32(),
-			&codecs.H264Payloader{}, rtp.NewRandomSequencer(), clockRate)
 
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGABRT, syscall.SIGTERM, syscall.SIGHUP)
 		defer signal.Stop(sig)
 
-		var frameBuffer = make([]byte, s.BufferSize())
-		var pktBuffer = make([]byte, mtu)
-		sampler := &sampler{clockRate, time.Now()}
-		enc := func(w io.Writer, buf []byte) error {
-			img, err := video.DecodeToYUV420(p.PixelFormat, buf, p.Width, p.Height)
-			if err != nil {
-				return err
-			}
-			l, err := codec.EncodeFrame(frameBuffer, img)
-			if l > 0 {
-				for _, pkt := range packetizer.Packetize(frameBuffer[:l], sampler.Samples()) {
-					n, err := pkt.MarshalTo(pktBuffer)
-					if err != nil {
-						log.Println(err)
-						break
-					}
-					if _, err = w.Write(pktBuffer[:n]); err != nil {
-						return err
-					}
-				}
-			}
-			return err
-		}
 		for {
 			select {
 			case <-sig:
 				return
 			default:
-				if err = encode(writer, enc); err != nil {
+				if err = process(writer); err != nil {
 					log.Println(err)
 					return
 				}
@@ -137,19 +122,24 @@ func main() {
 		w.Header().Add("Content-Type", contentType)
 		partHeader := make(textproto.MIMEHeader)
 		partHeader.Add("Content-Type", "image/jpeg")
+
+		enc := func(w io.Writer) writerFn {
+			return func(buf []byte) (n int, err error) {
+				img, err := video.Decode(p.PixelFormat, buf, p.Width, p.Height)
+				if err != nil {
+					return n, err
+				}
+				return n, jpeg.Encode(w, img, nil) // FIXME: n?
+			}
+		}
+
 		for {
 			partWriter, err := mimeWriter.CreatePart(partHeader)
 			if err != nil {
 				log.Println(err)
 				return
 			}
-			err = encode(partWriter, func(w io.Writer, buf []byte) error {
-				img, err := video.Decode(p.PixelFormat, buf, p.Width, p.Height)
-				if err != nil {
-					return err
-				}
-				return jpeg.Encode(w, img, nil)
-			})
+			err = process(enc(partWriter))
 			if err != nil {
 				log.Println(err)
 				return
@@ -159,14 +149,35 @@ func main() {
 	http.ListenAndServe("localhost:5000", nil)
 }
 
-type sampler struct {
-	clockRate float64
-	timestamp time.Time
-}
+type writerFn func(p []byte) (n int, err error)
 
-func (s *sampler) Samples() (n uint32) {
-	now := time.Now()
-	n = uint32(math.Round(s.clockRate * now.Sub(s.timestamp).Seconds()))
-	s.timestamp = now
-	return
+func (w writerFn) Write(p []byte) (n int, err error) { return w(p) }
+
+func newH264RTPWriter(w io.Writer) writerFn {
+	const mtu = 1000
+	const payloadType = 125
+	const clockRate = 9000
+	var timestamp time.Time
+	var samples = func() (n uint32) {
+		now := time.Now()
+		n = uint32(math.Round(clockRate * now.Sub(timestamp).Seconds()))
+		timestamp = now
+		return
+	}
+	pz := rtp.NewPacketizer(mtu, uint8(payloadType), rand.Uint32(),
+		&codecs.H264Payloader{}, rtp.NewRandomSequencer(), clockRate)
+	pktBuffer := make([]byte, mtu)
+	return func(p []byte) (n int, err error) {
+		for _, pkt := range pz.Packetize(p, samples()) {
+			l, err := pkt.MarshalTo(pktBuffer)
+			if err != nil {
+				return n, err
+			}
+			if _, err = w.Write(pktBuffer[:l]); err != nil {
+				return n, err
+			}
+			n += l
+		}
+		return
+	}
 }

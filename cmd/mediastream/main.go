@@ -5,6 +5,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"image"
 	"image/jpeg"
 	"io"
 	"log"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/zyxar/mediastream/lib/avfoundation"
 	"github.com/zyxar/mediastream/lib/codec/openh264"
+	"github.com/zyxar/mediastream/lib/codec/vpx"
 	"github.com/zyxar/mediastream/lib/format"
 	"github.com/zyxar/mediastream/lib/video"
 
@@ -34,6 +36,7 @@ var (
 	selectedFormat    = flag.String("format", "NV12", "set pixel format")
 	selectedFrameRate = flag.Float64("framerate", 30, "set frame rate")
 	selectedOut       = flag.String("out", "", "set output file name")
+	selectedCodec     = flag.String("codec", "h264", "set codec for output (h264/vp8/vp9)")
 )
 
 func main() {
@@ -58,10 +61,43 @@ func main() {
 	}
 
 	if *selectedOut != "" {
-		codec, err := openh264.NewEncoder(p.Width, p.Height, 500_000, p.FrameRate)
-		if err != nil {
-			log.Fatal(err)
+		var frameEncoder interface {
+			EncodeFrame(dst []byte, i image.Image) (int, error)
 		}
+		var payloader rtp.Payloader
+		var payloadType uint8
+		switch strings.ToLower(*selectedCodec) {
+		case "h264", "264":
+			codec, err := openh264.NewEncoder(p.Width, p.Height, 500_000, p.FrameRate)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer codec.Close()
+			frameEncoder = codec
+			payloader = &codecs.H264Payloader{}
+			payloadType = 125
+		case "vp8":
+			codec, err := vpx.NewVP8Encoder(p.Width, p.Height, 500_000, 60, p.FrameRate)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer codec.Close()
+			frameEncoder = codec
+			payloader = &codecs.VP8Payloader{}
+			payloadType = 100
+		case "vp9":
+			codec, err := vpx.NewVP9Encoder(p.Width, p.Height, 500_000, 60, p.FrameRate)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer codec.Close()
+			frameEncoder = codec
+			payloader = &codecs.VP9Payloader{}
+			payloadType = 101
+		default:
+			log.Fatalf("unsupported codec: %v", *selectedCodec)
+		}
+
 		var frameBuffer = make([]byte, s.BufferSize())
 		enc := func(w io.Writer) writerFn {
 			return func(buf []byte) (n int, err error) {
@@ -69,7 +105,7 @@ func main() {
 				if err != nil {
 					return n, err
 				}
-				l, err := codec.EncodeFrame(frameBuffer, img)
+				l, err := frameEncoder.EncodeFrame(frameBuffer, img)
 				if l > 0 {
 					return w.Write(frameBuffer[:l])
 				}
@@ -89,7 +125,7 @@ func main() {
 				log.Fatal(err)
 			}
 			defer conn.Close()
-			writer = enc(newH264RTPWriter(conn))
+			writer = enc(newRTPWriter(conn, payloadType, payloader))
 		default:
 			file, err := os.Create(*selectedOut)
 			if err != nil {
@@ -114,6 +150,8 @@ func main() {
 				}
 			}
 		}
+
+		os.Exit(0)
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -153,9 +191,8 @@ type writerFn func(p []byte) (n int, err error)
 
 func (w writerFn) Write(p []byte) (n int, err error) { return w(p) }
 
-func newH264RTPWriter(w io.Writer) writerFn {
+func newRTPWriter(w io.Writer, payloadType uint8, payloader rtp.Payloader) writerFn {
 	const mtu = 1000
-	const payloadType = 125
 	const clockRate = 9000
 	var timestamp time.Time
 	var samples = func() (n uint32) {
@@ -164,8 +201,8 @@ func newH264RTPWriter(w io.Writer) writerFn {
 		timestamp = now
 		return
 	}
-	pz := rtp.NewPacketizer(mtu, uint8(payloadType), rand.Uint32(),
-		&codecs.H264Payloader{}, rtp.NewRandomSequencer(), clockRate)
+	pz := rtp.NewPacketizer(mtu, payloadType, rand.Uint32(),
+		payloader, rtp.NewRandomSequencer(), clockRate)
 	pktBuffer := make([]byte, mtu)
 	return func(p []byte) (n int, err error) {
 		for _, pkt := range pz.Packetize(p, samples()) {
